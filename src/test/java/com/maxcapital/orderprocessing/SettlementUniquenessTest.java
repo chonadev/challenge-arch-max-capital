@@ -1,6 +1,5 @@
 package com.maxcapital.orderprocessing;
 
-import com.maxcapital.orderprocessing.model.OutboxEvent;
 import com.maxcapital.orderprocessing.repository.OutboxRepository;
 import com.maxcapital.orderprocessing.service.OrderProcessingService;
 import org.junit.jupiter.api.Test;
