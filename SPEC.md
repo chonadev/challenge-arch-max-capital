@@ -264,6 +264,23 @@ un NEW implícito con datos de un ER que no es el fundacional.
   el estado (verifica que el lock pesimista realmente serializa el
   acceso, no solo en el caso feliz sin contención).
 
+### 4.8 Manejo de errores y DLQ (`ExecutionReportListenerTest`)
+
+**Agregado tras revisión post-implementación**: los casos 4.1 a 4.7
+ejercitan `OrderProcessingService` directamente, sin pasar por
+`ExecutionReportListener` — la capa que decide el ruteo a DLQ según
+tipo de excepción (spec §2 G5). Verificado manualmente contra Kafka
+real, pero faltaba cobertura automatizada. Se agrega como caso
+explícito para no depender solo de verificación manual:
+
+- Un ER con campos obligatorios faltantes (`PermanentProcessingException`)
+  se publica a `er.raw.dlq` y no llega a crear/modificar ninguna orden.
+- Un ER válido en forma pero con transición de estado inválida
+  (`InvalidStateTransitionException`) se publica a `er.raw.dlq` sin
+  modificar la orden existente.
+- En ambos casos, el offset del mensaje original se confirma (ack) —
+  no debe reintentarse indefinidamente.
+
 ---
 
 ## 5. Distinción: idempotencia de negocio vs. de transporte
