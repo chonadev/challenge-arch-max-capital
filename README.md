@@ -22,6 +22,31 @@ volumen primero (ver sección de troubleshooting).
 - `GET /orders/{numericOrderId}` — estado actual de la orden + ledger
 - `POST /test/seed/{scenario}` — dispara un escenario de prueba a `er.raw`
 
+Ejemplo de respuesta de `GET /orders/1001` tras correr el escenario
+`interleaved` (ver sección siguiente):
+
+```json
+{
+  "numericOrderId": 1001,
+  "ticker": "VSCPC",
+  "side": "BUY",
+  "status": "FILLED",
+  "nominalAmounts": 5000.0000,
+  "leavesNominalAmount": 0.0000,
+  "accumulativeNominalAmount": 5000.0000,
+  "executionsCount": 3,
+  "ledger": [
+    { "id": 1, "fixId": 1001, "statusApplied": "NEW", "secondaryTradeId": "ST-1001-A", "operationNumber": "OP-1001-A", "appliedAt": "..." },
+    { "id": 3, "fixId": 1002, "statusApplied": "PARTIALLY_FILLED", "secondaryTradeId": "ST-1001-B", "operationNumber": "OP-1001-B", "appliedAt": "..." },
+    { "id": 5, "fixId": 1003, "statusApplied": "FILLED", "secondaryTradeId": "ST-1001-C", "operationNumber": "OP-1001-C", "appliedAt": "..." }
+  ]
+}
+```
+`status` y `executionsCount` reflejan el estado actual de la orden;
+`ledger` trae el detalle en orden de inserción — según lo pedido
+explícitamente en el enunciado (sección "Qué tenés que construir",
+punto 5).
+
 ## Escenarios de prueba
 
 ### 1. ER intercalados entre dos órdenes (`interleaved`)
@@ -74,9 +99,24 @@ Usa Testcontainers (Postgres + Kafka reales, no mocks) — requiere Docker
 corriendo, pero no requiere que `docker compose up` esté levantado (los
 containers de test son efímeros e independientes).
 
-Cobertura: idempotencia, transición de estado inválida, secuencia
-intercalada, settlement único, creación de orden con validación de
-invariante. Ver `SPEC.md` §4 para el detalle de cada caso de aceptación.
+El enunciado pide priorizar los puntos más frágiles del sistema en vez
+de cobertura amplia. Los tests cubren exactamente las garantías
+identificadas como críticas en `SPEC.md §4`:
+
+- **Idempotencia** — un ER duplicado/reentregado no corrompe el estado
+- **Transición de estado inválida** — un ER no puede aplicarse sobre una
+  orden ya terminal
+- **Secuencia intercalada** — cada orden refleja fielmente su propia
+  secuencia de ER, sin cruzarse con otras órdenes procesadas en paralelo
+- **Settlement único** — el evento de settlement no se duplica ante
+  reentrega del ER que completa la orden
+- **Creación de orden** — el primer ER de una orden nueva debe ser `NEW`
+- **Manejo de errores (DLQ)** — un ER con datos inválidos o con
+  transición imposible termina en `er.raw.dlq`, sin pérdida silenciosa
+  ni bloqueo del flujo
+
+No se testea código trivial (getters, mapeos DTO) conforme al criterio
+del enunciado.
 
 ## Troubleshooting
 
