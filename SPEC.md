@@ -116,18 +116,14 @@ indefinidamente el flujo de su partición (y por extensión, de las demás
 órdenes de esa partición).
 
 **Taxonomía de errores**:
-- **Permanente** (no reintentable): JSON malformado, campos obligatorios
-  faltantes, o transición de estado inválida (violación de I2). Se
-  publica a `er.raw.dlq` y se hace ack — no bloquea el flujo.
+- **Permanente** (no reintentable): JSON malformado, texto plano no JSON, campos obligatorios
+  faltantes, o transición de estado inválida (`PermanentProcessingException`, `InvalidStateTransitionException`). 
+  Se excluyen de los reintentos (`exclude`), registrando un `log.error` inmediato y derivándolos directamente a `er.raw.dlq` sin bloquear el flujo.
 - **Transitorio** (reintentable): fallo de conexión a DB, timeout de red.
-  No se hace ack; Kafka reentrega naturalmente en el siguiente poll.
+  Se gestionan automáticamente mediante `@RetryableTopic` (3 intentos con backoff exponencial) y, si se agotan, se envían a la DLQ.
 
-**Decisión D3**: se optó por no-ack + redelivery natural de Kafka en vez
-de `@RetryableTopic` con backoff configurable, para mantener un único
-mecanismo de control de flujo (ack manual) simple de razonar y explicar
-de punta a punta. Trade-off consciente: menos control fino sobre backoff
-y cantidad de reintentos antes de considerar algo "agotado". En una
-versión completa, se agregaría backoff exponencial con tope de intentos.
+**Deserialización Segura**:
+- Uso de `ErrorHandlingDeserializer` en `KafkaConsumerConfig` para prevenir bucles infinitos de reintentos ante poison pills o strings malformados, entregando un valor `null` que la validación rutea a DLQ.
 
 ### G6 — Settlement exactamente una vez
 Cuando una orden llega a `FILLED`, se publica un evento de settlement
@@ -303,8 +299,6 @@ hardening de producción"):
 - No hay autenticación/autorización en los endpoints.
 - No se implementa el consumidor del topic `settlement` (el PDF dice
   explícitamente que no hace falta).
-- Backoff configurable y límite de reintentos no está implementado
-  (ver Decisión D3, §2 G5) — se documenta como próximo paso.
 - No hay UI.
 - No se versiona el DDL con migraciones incrementales (V2, V3...) — se
   edita `V1` directamente durante la fase de diseño activo del esquema,

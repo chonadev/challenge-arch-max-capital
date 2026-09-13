@@ -86,28 +86,20 @@ con datos de un ER que no debería ser el fundacional — evita que un
 mensaje corrupto o fuera de secuencia (por una falla ajena a la garantía
 de orden del broker) contamine el estado inicial de una orden.
 
-## 6. Política de errores de procesamiento
+## 6. Política de errores de procesamiento y reintentos
 
 **Taxonomía**:
-- **Permanente** (no reintentable): JSON malformado, campos obligatorios
-  faltantes, o transición de estado inválida. Se publica a `er.raw.dlq`
-  y se hace ack — no bloquea el flujo de la partición.
-- **Transitorio** (reintentable): fallo de conexión a DB, timeout de red.
-  No se hace ack; Kafka reentrega naturalmente en el siguiente poll.
+- **Permanente** (no reintentable): JSON malformado, texto plano no JSON, campos obligatorios
+  faltantes, o transición de estado inválida (`PermanentProcessingException`, `InvalidStateTransitionException`). 
+  Se excluyen de los reintentos (`exclude`), registrando un `log.error` inmediato y derivándolos directamente a `er.raw.dlq` sin bloquear el flujo de la partición.
+- **Transitorio** (reintentable): fallo de conexión a DB, timeout de red. 
+  Se gestionan automáticamente mediante `@RetryableTopic` con reintentos configurados (3 intentos con backoff exponencial) y, si se agotan, se envían a la DLQ.
 
-**Cómo se evita perder o duplicar un ER en el proceso**: `ack-mode:
-manual`. El offset solo avanza si la transacción completa (lock + ledger
-+ update + outbox) hizo commit exitosamente. Si la instancia muere antes
-  del ack, Kafka reentrega el mismo mensaje al reiniciar, y la idempotencia
-  del ledger absorbe esa reentrega sin duplicar.
+**Mecanismo de Deserialización Segura**:
+- Uso de `ErrorHandlingDeserializer` en `KafkaConsumerConfig` para envolver key y value. 
+  Si se recibe un mensaje con formato corrupto o texto plano (poison pill), no se entra en bucle infinito de reintentos a nivel de consumidor; el deserializador produce un valor `null` que la validación detecta y rutea como error permanente hacia la DLQ.
 
-**Trade-off consciente**: se optó por no-ack + redelivery natural de
-Kafka en vez de `@RetryableTopic` con backoff configurable, para mantener
-un único mecanismo de control de flujo, simple de razonar y explicar de
-punta a punta. Se resigna control fino sobre backoff y cantidad de
-intentos antes de considerar algo agotado. En una versión completa, se
-agregaría backoff exponencial con tope de reintentos antes de rutear a
-DLQ también los transitorios persistentes.
+**Cómo se evita perder o duplicar un ER**: `ack-mode: record` (gestionado por Spring Kafka y `@RetryableTopic`). El offset solo se confirma tras completar el procesamiento con éxito o al derivar el mensaje a DLQ. La idempotencia del ledger absorbe cualquier reentrega.
 
 ## 7. Cómo se garantiza que el settlement se emita una sola vez
 
@@ -140,10 +132,6 @@ outbox.
 
 ## 8. Trade-offs dejados afuera a propósito
 
-- **Backoff configurable / límite de reintentos**: se usa redelivery
-  natural de Kafka sin backoff exponencial (ver punto 6). En una versión
-  completa se agregaría `@RetryableTopic` o un contador de intentos
-  manual.
 - **Consumidor del topic `settlement`**: no se implementa, conforme al
   PDF ("no hace falta implementar el consumidor de ese settlement").
 - **Migraciones incrementales de DDL** (V2, V3...): se editó `V1`

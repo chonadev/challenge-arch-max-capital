@@ -11,6 +11,7 @@ import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.listener.ContainerProperties;
+import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
 
 import java.util.HashMap;
@@ -33,8 +34,10 @@ public class KafkaConsumerConfig {
         props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
-        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+        props.put(ErrorHandlingDeserializer.KEY_DESERIALIZER_CLASS, StringDeserializer.class.getName());
+        props.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JsonDeserializer.class.getName());
         props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.maxcapital.orderprocessing.dto");
         props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, ExecutionReport.class.getName());
         props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, false);
@@ -46,13 +49,8 @@ public class KafkaConsumerConfig {
         ConcurrentKafkaListenerContainerFactory<String, ExecutionReport> factory =
             new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory());
-        // ack-mode manual: el offset solo se confirma cuando el listener
-        // llama a ack.acknowledge() explicitamente, y eso solo pasa
-        // despues de que la transaccion de OrderProcessingService
-        // haya hecho commit con exito. Asi, si el proceso muere a mitad
-        // de camino, al reiniciar Kafka reentrega el mismo mensaje
-        // (no se perdio) y la idempotencia del ledger evita duplicarlo.
-        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL);
+        // ack-mode record: requerido por @RetryableTopic para la gestion automatica de offsets y reintentos.
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.RECORD);
         return factory;
     }
 }
