@@ -2,6 +2,7 @@ package com.maxcapital.orderprocessing.dto;
 
 import com.maxcapital.orderprocessing.model.ExecutionLedger;
 import com.maxcapital.orderprocessing.model.Order;
+import org.springframework.data.domain.Page;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -16,9 +17,9 @@ public record OrderResponse(
     BigDecimal leavesNominalAmount,
     BigDecimal accumulativeNominalAmount,
     Integer executionsCount,
-    List<LedgerEntryResponse> ledger
+    LedgerPage ledger
 ) {
-    public static OrderResponse from(Order order, List<ExecutionLedger> ledgerEntries) {
+    public static OrderResponse from(Order order, Page<ExecutionLedger> ledgerPage) {
         return new OrderResponse(
             order.getNumericOrderId(),
             order.getTicker(),
@@ -28,8 +29,26 @@ public record OrderResponse(
             order.getLeavesNominalAmount(),
             order.getAccumulativeNominalAmount(),
             order.getExecutionsCount(),
-            ledgerEntries.stream().map(LedgerEntryResponse::from).toList()
+            LedgerPage.from(ledgerPage)
         );
+    }
+
+    public record LedgerPage(
+        List<LedgerEntryResponse> content,
+        int page,
+        int size,
+        long totalElements,
+        int totalPages
+    ) {
+        public static LedgerPage from(Page<ExecutionLedger> entries) {
+            return new LedgerPage(
+                entries.getContent().stream().map(LedgerEntryResponse::from).toList(),
+                entries.getNumber(),
+                entries.getSize(),
+                entries.getTotalElements(),
+                entries.getTotalPages()
+            );
+        }
     }
 
     public record LedgerEntryResponse(

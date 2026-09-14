@@ -19,7 +19,7 @@ volumen primero (ver sección de troubleshooting).
 
 ## Endpoints
 
-- `GET /orders/{numericOrderId}` — estado actual de la orden + ledger
+- `GET /orders/{numericOrderId}` — estado actual de la orden + ledger paginado (`?page=0&size=10`)
 - `POST /test/seed/{scenario}` — dispara un escenario de prueba a `er.raw`
 
 Ejemplo de respuesta de `GET /orders/1001` tras correr el escenario
@@ -35,17 +35,24 @@ Ejemplo de respuesta de `GET /orders/1001` tras correr el escenario
   "leavesNominalAmount": 0.0000,
   "accumulativeNominalAmount": 5000.0000,
   "executionsCount": 3,
-  "ledger": [
-    { "id": 1, "fixId": 1001, "statusApplied": "NEW", "secondaryTradeId": "ST-1001-A", "operationNumber": "OP-1001-A", "appliedAt": "..." },
-    { "id": 3, "fixId": 1002, "statusApplied": "PARTIALLY_FILLED", "secondaryTradeId": "ST-1001-B", "operationNumber": "OP-1001-B", "appliedAt": "..." },
-    { "id": 5, "fixId": 1003, "statusApplied": "FILLED", "secondaryTradeId": "ST-1001-C", "operationNumber": "OP-1001-C", "appliedAt": "..." }
-  ]
+  "ledger": {
+    "content": [
+      { "id": 1, "fixId": 1001, "statusApplied": "NEW", "secondaryTradeId": "ST-1001-A", "operationNumber": "OP-1001-A", "appliedAt": "..." },
+      { "id": 3, "fixId": 1002, "statusApplied": "PARTIALLY_FILLED", "secondaryTradeId": "ST-1001-B", "operationNumber": "OP-1001-B", "appliedAt": "..." },
+      { "id": 5, "fixId": 1003, "statusApplied": "FILLED", "secondaryTradeId": "ST-1001-C", "operationNumber": "OP-1001-C", "appliedAt": "..." }
+    ],
+    "page": 0,
+    "size": 10,
+    "totalElements": 3,
+    "totalPages": 1
+  }
 }
 ```
 `status` y `executionsCount` reflejan el estado actual de la orden;
-`ledger` trae el detalle en orden de inserción — según lo pedido
-explícitamente en el enunciado (sección "Qué tenés que construir",
-punto 5).
+`ledger` trae el detalle paginado y siempre en orden de inserción, con
+los query params `page` y `size` (defaults `0` y `10`).
+`totalElements`/`totalPages` permiten saber si hay más páginas por pedir.
+Una orden inexistente responde `404` con `{"error": "NOT_FOUND", "message": "..."}`.
 
 ## Escenarios de prueba
 

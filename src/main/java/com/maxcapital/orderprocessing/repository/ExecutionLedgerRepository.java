@@ -1,16 +1,32 @@
 package com.maxcapital.orderprocessing.repository;
 
 import com.maxcapital.orderprocessing.model.ExecutionLedger;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.List;
 
 public interface ExecutionLedgerRepository extends JpaRepository<ExecutionLedger, Long> {
 
+    /**
+     * Ledger completo de una orden en orden de insercion (id asc).
+     * Usado por el flujo de consulta paginado (via el service) y por
+     * los tests de integracion que verifican la secuencia completa.
+     */
     List<ExecutionLedger> findByNumericOrderIdOrderByIdAsc(Long numericOrderId);
+
+    /**
+     * Ledger de una orden, paginado. El ORDER BY por id NO se deriva
+     * aqui: el sort lo fija el servicio (id ascendente = orden de
+     * insercion), para que el contrato no dependa del llamador.
+     */
+    Page<ExecutionLedger> findByNumericOrderId(Long numericOrderId, Pageable pageable);
 
     boolean existsBySecondaryTradeIdAndOperationNumber(String secondaryTradeId, String operationNumber);
 
@@ -38,10 +54,10 @@ public interface ExecutionLedgerRepository extends JpaRepository<ExecutionLedger
         @Param("fixId") Long fixId,
         @Param("numericOrderId") Long numericOrderId,
         @Param("statusApplied") String statusApplied,
-        @Param("executionPrice") java.math.BigDecimal executionPrice,
-        @Param("executionNominalAmount") java.math.BigDecimal executionNominalAmount,
+        @Param("executionPrice") BigDecimal executionPrice,
+        @Param("executionNominalAmount") BigDecimal executionNominalAmount,
         @Param("secondaryTradeId") String secondaryTradeId,
         @Param("operationNumber") String operationNumber,
-        @Param("transactionTime") java.time.LocalDateTime transactionTime
+        @Param("transactionTime") LocalDateTime transactionTime
     );
 }
