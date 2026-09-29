@@ -9,5 +9,10 @@ spring:
     consumer:
       auto-offset-reset: earliest
       enable-auto-commit: false
-    listener:
-      ack-mode: manual
+
+app:
+  outbox:
+    # El poller compite por las mismas filas que OutboxClaimTest y se las
+    # llevaria (las marca published antes de que el test pueda reclamarlas).
+    # Apagado para que las pruebas del claim sean deterministas.
+    poller-enabled: false

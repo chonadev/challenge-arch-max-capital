@@ -46,6 +46,10 @@ app:
   outbox:
     poll-interval-ms: 500
     batch-size: 100
+    # Un claim mas viejo que esto se considera de un poller caido y la
+    # fila vuelve a ser reclamable. Debe superar el peor caso de
+    # publish de un batch completo (batch-size x latencia de ack).
+    claim-stale-secs: 60
 
 instance:
   id: ${HOSTNAME:local}

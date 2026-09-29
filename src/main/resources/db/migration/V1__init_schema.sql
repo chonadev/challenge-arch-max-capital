@@ -49,7 +49,17 @@ CREATE TABLE outbox (
     created_at          TIMESTAMP NOT NULL DEFAULT now(),
     published_at        TIMESTAMP,
 
+    -- Claim del poller. NULL = nadie lo tiene tomado. Se escribe en la
+    -- MISMA transaccion que toma el lock (ver OutboxRepository), asi que
+    -- queda durable al commit: es lo que impide que dos pollers en
+    -- paralelo publiquen la misma fila. Un claim mas viejo que
+    -- app.outbox.claim-stale-secs se considera de un poller caido y
+    -- vuelve a ser reclamable (recuperacion ante falla).
+    locked_at           TIMESTAMP,
+
     CONSTRAINT uq_outbox_order_settlement UNIQUE (numeric_order_id, event_type)
 );
 
-CREATE INDEX idx_outbox_pending ON outbox(published) WHERE published = false;
+-- Soporta el claim: filtra por published=false, ordena por id y
+-- discrimina por locked_at. Es la unica consulta caliente del poller.
+CREATE INDEX idx_outbox_claimable ON outbox(id, locked_at) WHERE published = false;

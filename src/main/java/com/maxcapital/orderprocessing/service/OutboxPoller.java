@@ -1,16 +1,14 @@
 package com.maxcapital.orderprocessing.service;
 
 import com.maxcapital.orderprocessing.model.OutboxEvent;
-import com.maxcapital.orderprocessing.repository.OutboxRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -23,16 +21,27 @@ import java.util.List;
  * delega a este proceso aparte, que puede reintentar sin riesgo de
  * dejar la orden en un estado inconsistente.
  *
- * FOR UPDATE SKIP LOCKED (en el repository): con las dos instancias
- * corriendo su propio poller en paralelo, cada una toma un subconjunto
- * de filas sin coordinacion explicita entre ellas ni pisarse.
+ * Exclusion mutua entre las dos instancias: se resuelve con el CLAIM
+ * (locked_at) de OutboxRepositoryService, no solo con el
+ * FOR UPDATE SKIP LOCKED del SELECT. El SKIP LOCKED alcanza mientras
+ * los locks estan tomados; el claim, ademas, queda escrito en la misma
+ * transaccion del SELECT, asi que sigue siendo visible para el otro
+ * poller aunque su SELECT arranque despues de que esta transaccion ya
+ * commiteo. Sin ese segundo paso, dos pollers con SELECTs no solapados
+ * leian la misma fila published=false y ambos la publicaban.
+ *
+ * Lo que este diseno NO garantiza:Exactly-once. Si el proceso muere
+ * entre el ack del broker y el markAsPublished, el evento se republica
+ * en el proximo ciclo. La deduplicacion por numericOrderId es
+ * responsabilidad del consumidor downstream (SPEC.md G6).
  */
 @Service
+@ConditionalOnProperty(name = "app.outbox.poller-enabled", havingValue = "true", matchIfMissing = true)
 @RequiredArgsConstructor
 @Slf4j
 public class OutboxPoller {
 
-    private final OutboxRepository outboxRepository;
+    private final OutboxRepositoryService outboxRepositoryService;
     private final KafkaTemplate<String, Object> kafkaTemplate;
 
     @Value("${app.kafka.topic-settlement}")
@@ -41,9 +50,13 @@ public class OutboxPoller {
     @Value("${app.outbox.batch-size}")
     private int batchSize;
 
+    @Value("${app.outbox.claim-stale-secs}")
+    private int claimStaleSecs;
+
     @Scheduled(fixedDelayString = "${app.outbox.poll-interval-ms}")
     public void pollAndPublish() {
-        List<OutboxEvent> pending = fetchPendingBatch();
+        List<OutboxEvent> pending =
+                outboxRepositoryService.claimPendingBatch(batchSize, claimStaleSecs);
         if (!pending.isEmpty()) {
             log.info("OutboxPoller: {} eventos pendientes encontrados", pending.size());
         }
@@ -53,32 +66,13 @@ public class OutboxPoller {
         }
     }
 
-    /**
-     * Lectura del batch en su propia transaccion corta: el lock de
-     * SKIP LOCKED se toma y se libera aca (tras el SELECT), antes de
-     * hacer las llamadas de red a Kafka - asi no mantenemos filas
-     * bloqueadas mientras esperamos el ack del broker.
-     */
-    @Transactional
-    protected List<OutboxEvent> fetchPendingBatch() {
-        return outboxRepository.findPendingBatch(batchSize);
-    }
-
-    /**
-     * Publica un evento y SOLO SI el broker confirma el ack, marca
-     * published=true. Si el send falla o el proceso muere antes de
-     * marcar, la fila sigue published=false y se vuelve a intentar
-     * en el proximo ciclo - a costa de un posible reenvio duplicado,
-     * que el consumidor downstream debe poder deduplicar por
-     * numericOrderId (documentado en DECISIONS.md).
-     */
     private void publishOne(OutboxEvent event) {
         try {
             kafkaTemplate.send(settlementTopic, String.valueOf(event.getNumericOrderId()),
                     event.getPayload())
                 .get(); // espera confirmacion sincronica del broker
 
-            markAsPublished(event.getId());
+            outboxRepositoryService.markAsPublished(event.getId());
             log.info("Settlement publicado: outboxId={} numericOrderId={}",
                 event.getId(), event.getNumericOrderId());
 
@@ -87,16 +81,20 @@ public class OutboxPoller {
                     "Se reintentara en el proximo ciclo del poller.",
                 event.getId(), event.getNumericOrderId(), e);
             // no se marca published=true: queda pendiente para el
-            // proximo poll, no se pierde
+            // proximo poll, no se pierde. Se libera el claim para que el
+            // reintento sea en el proximo ciclo y no al vencer el stale.
+            releaseClaimQuietly(event.getId());
         }
     }
 
-    @Transactional
-    protected void markAsPublished(Long outboxId) {
-        outboxRepository.findById(outboxId).ifPresent(event -> {
-            event.setPublished(true);
-            event.setPublishedAt(LocalDateTime.now());
-            outboxRepository.save(event);
-        });
+    private void releaseClaimQuietly(Long outboxId) {
+        try {
+            outboxRepositoryService.releaseClaim(outboxId);
+        } catch (Exception releaseError) {
+            // no enmascara el error original: el claim vence solo por
+            // app.outbox.claim-stale-secs, asi que la fila se reintenta igual
+            log.warn("No se pudo liberar el claim del outbox id={}. Reintento por " +
+                    "vencimiento del claim en {}s.", outboxId, claimStaleSecs, releaseError);
+        }
     }
 }

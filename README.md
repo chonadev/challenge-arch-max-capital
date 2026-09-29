@@ -121,6 +121,10 @@ identificadas como críticas en `SPEC.md §4`:
 - **Manejo de errores (DLQ)** — un ER con datos inválidos o con
   transición imposible termina en `er.raw.dlq`, sin pérdida silenciosa
   ni bloqueo del flujo
+- **Exclusión mutua entre los dos pollers** — un segundo poller no
+  reclama una fila ya tomada (`locked_at`), un claim vencido vuelve a
+  ser reclamable, y un publish fallido libera el claim para reintentar
+  en el siguiente ciclo
 
 No se testea código trivial (getters, mapeos DTO) conforme al criterio
 del enunciado.
@@ -129,7 +133,9 @@ del enunciado.
 
 **Error de Flyway (`Migration checksum mismatch`)**: pasa si el DDL
 cambió después de que la base ya corrió una versión anterior de la
-migración. Solución en desarrollo:
+migración. Es esperable tras cualquier cambio en `V1__init_schema.sql`
+(el `outbox` tiene una columna `locked_at` que se agregó después del
+primer arranque). Solución en desarrollo:
 
 ```bash
 docker compose down -v

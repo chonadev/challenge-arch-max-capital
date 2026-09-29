@@ -114,17 +114,43 @@ tiempo completa.
 1. Al aplicar el ER que lleva la orden a FILLED, se inserta una fila en
    `outbox` en la misma transacción que el update de la orden —
    atomicidad DB-vs-DB, trivial de lograr.
-2. Un poller separado (`@Scheduled`, cada 500ms) lee filas pendientes con
-   `SELECT ... FOR UPDATE SKIP LOCKED` y las publica.
+2. Un poller separado (`@Scheduled`, cada 500ms) **reclama** un batch de
+   filas pendientes y las publica.
 3. Solo tras confirmar el ack del broker (`.get()` bloqueante), se marca
    `published=true`.
 
-`SKIP LOCKED` permite que las dos instancias corran su propio poller en
-paralelo sin coordinación explícita ni pisarse — cada una toma un
-subconjunto de filas.
+**Por qué el reparto entre las dos instancias NO se resuelve solo con
+`SKIP LOCKED`**: el lock de `SELECT ... FOR UPDATE SKIP LOCKED` se
+libera al commitear la transacción de lectura, pero el `send()` a Kafka
+y el `markAsPublished()` pasan después. Dos pollers cuyos `SELECT` no se
+solapan leen la misma fila `published=false` y la publican los dos —
+por eso el síntoma era un porcentaje de duplicados y no un fallo
+consistente.
+
+La exclusión real la da un **claim** (`outbox.locked_at`): una sola
+transacción hace el `SELECT ... FOR UPDATE SKIP LOCKED` filtrando por
+`locked_at`, y escribe `locked_at = now()` en las mismas filas. Al
+commit, la propiedad queda durable — el otro poller excluye la fila
+aunque su `SELECT` arranque después de que los locks se liberaron. Un
+claim más viejo que `app.outbox.claim-stale-secs` vuelve a ser
+reclamable (recuperación si el poller se cae a mitad de publish).
+
+Se implementó esto **después** de una revisión que encontró la ventana,
+no preventivamente: el diseño inicial daba por buena la garantía de
+`SKIP LOCKED` y el test de aceptación 4.5 cubría solo el insert, nunca
+el reparto entre pollers. Análisis completo en `SPEC.md` §2 G6; cubierto
+por `OutboxClaimTest` (§4.9).
 
 `UNIQUE(numeric_order_id, event_type)` en `outbox` es la defensa
-adicional contra doble insert por la misma orden.
+adicional contra doble insert por la misma orden — no sustituye al
+claim, que protege contra doble *publicación*.
+
+**Lo que sigue sin resolverse**: la ventana del crash individual entre
+el ack del broker y el `published=true`. El evento se republica en el
+próximo ciclo. La deduplicación por `numericOrderId` queda como
+responsabilidad del consumidor downstream. Cerrar eso exigiría una
+transacción distribuida entre Postgres y Kafka o CDC, ambas fuera del
+alcance del challenge.
 
 `CANCELLED` no emite settlement — regla explícita del PDF, implementada
 como condición simple (`if newStatus == FILLED`) antes del insert al

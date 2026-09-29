@@ -51,6 +51,9 @@ public class OutboxEvent {
     @Column(name = "published_at")
     private LocalDateTime publishedAt;
 
+    @Column(name = "locked_at")
+    private LocalDateTime lockedAt;
+
     @PrePersist
     void onCreate() {
         this.createdAt = LocalDateTime.now();

@@ -104,11 +104,20 @@ group donde en teoría podría haber superposición. Ver Decisión D2.
 Si una instancia cae a mitad de procesamiento, el ER no se pierde ni se
 aplica dos veces al reiniciar.
 
-**Mecanismo**: `ack-mode: manual` en el consumer de Kafka. El offset solo
-avanza si la transacción de aplicación del ER (lock + ledger + update +
-outbox) hizo commit exitosamente. Si el proceso muere antes del ack,
-Kafka reentrega el mismo mensaje al reiniciar — y G2 (idempotencia)
-absorbe esa reentrega sin duplicar.
+**Mecanismo**: `ack-mode: record` en el consumer de Kafka (configurado
+en `KafkaConsumerConfig`, no en el yml). El offset avanza solo después de
+que el handler del listener retorna sin excepción — y `OrderProcessingService.apply`
+corre dentro de una transacción que commitea antes de volver. Si el
+proceso muere antes del commit, el offset no avanzó y Kafka reentrega el
+mismo mensaje al reiniciar; G2 (idempotencia) absorbe esa reentrega sin
+duplicar.
+
+**Por qué `record` y no `manual`**: con `@RetryableTopic`, el manejo de
+offsets y de la DLQ lo administra Spring Kafka, y `AckMode.RECORD` es el
+que espera esa infraestructura. Un `MANUAL` explícito entraría en
+conflicto con el reintento automático: para poder reintentar el mismo
+mensaje en un topic de retry, el offset del original no debe haberse
+confirmado todavía.
 
 ### G5 — Manejo de errores sin pérdida silenciosa ni bloqueo indefinido
 Un ER que falla no se descarta sin dejar rastro, ni bloquea
@@ -131,6 +140,13 @@ downstream exactamente una vez por orden, sin duplicados ni pérdidas,
 incluso ante reentregas de ER o con las dos instancias corriendo.
 `CANCELLED` no emite settlement (regla explícita del PDF).
 
+> **Precisión sobre el título**: la garantía real del sistema es
+> *at-least-once* con deduplicación a cargo del downstream, no
+> exactly-once estricto. Ninguna combinación de outbox + lock sin
+> transacción distribuida entre la DB y el broker puede dar
+> exactly-once: siempre queda la ventana entre el ack del broker y el
+> commit del marcador local. Ver "Límite de la garantía" más abajo.
+
 **Por qué no alcanza con publicar directo a Kafka al detectar FILLED**:
 el "dual write" (DB + broker sin transacción compartida) puede perder el
 evento si el proceso muere entre el commit de la orden y el `send()` a
@@ -140,22 +156,65 @@ Kafka. Ver Decisión D4 para el análisis completo con línea de tiempo.
 1. Al aplicar el ER que lleva la orden a `FILLED`, se inserta una fila en
    `outbox` en la **misma transacción** que el update de la orden.
    Atomicidad DB-vs-DB, trivial de lograr.
-2. Un proceso poller separado (`@Scheduled`, cada 500ms) lee filas
-   pendientes (`published=false`) con `SELECT ... FOR UPDATE SKIP LOCKED`
-   y las publica a Kafka.
+2. Un proceso poller separado (`@Scheduled`, cada 500ms) **reclama** un
+   batch de filas pendientes y las publica a Kafka.
 3. Solo tras confirmar el ack del broker (`.get()` bloqueante sobre el
    `Future` del `send()`), se marca `published=true`.
 
-**Por qué `SKIP LOCKED`**: con las dos instancias corriendo su propio
-poller en paralelo, cada una toma un subconjunto de filas sin
-coordinación explícita ni pisarse.
+**Exclusión mutua entre los dos pollers — claim, no solo `SKIP LOCKED`**
 
-**Idempotencia del lado de publicación**: `UNIQUE(numeric_order_id,
-event_type)` en `outbox` evita doble insert por la misma orden. Si el
-poller publica pero muere antes de marcar `published=true`, el peor
-caso es una publicación duplicada a Kafka — el downstream (no
-implementado, según alcance del PDF) debería deduplicar por
-`numericOrderId`, documentado como responsabilidad del consumidor.
+El `SELECT ... FOR UPDATE SKIP LOCKED` **no alcanza** para garantizar
+que un evento se publique una sola vez. El lock se libera cuando la
+transacción de lectura commitea, pero el `send()` a Kafka y el
+`markAsPublished()` pasan *después*, en transacciones separadas:
+
+```
+t1  poller A: SELECT ... FOR UPDATE SKIP LOCKED -> fila, tx commitea, lock liberado
+t2  poller A: kafka.send().get()                  -> ack del broker
+t3  poller A: markAsPublished(id)                 -> published=true
+
+    ... en paralelo, si el SELECT de B cae entre t1 y t3:
+t1' poller B: SELECT ... FOR UPDATE SKIP LOCKED -> MISMA fila (published=false)
+t2' poller B: kafka.send().get()                  -> ack  => PUBLICADO DOS VECES
+```
+
+`SKIP LOCKED` solo coordina a los dos `SELECT` **si se solapan en el
+tiempo**. Con un poller cada 500ms por instancia, es normal que no se
+solapen, y entonces la garantía se pierde. Esto se observaba como un
+porcentaje de duplicados, no como un fallo consistente.
+
+**Mecanismo que sí cierra la ventana — `locked_at` (claim)**:
+
+1. `claimPendingBatch` corre **una sola transacción** que hace el
+   `SELECT ... FOR UPDATE SKIP LOCKED` filtrando por
+   `locked_at IS NULL OR locked_at < now() - stale`, y acto seguido
+   escribe `locked_at = now()` en esas mismas filas.
+2. Al commit, el claim queda **durable**: cuando los locks se liberan, la
+   fila ya está marcada como tomada y el otro poller la excluye aunque su
+   `SELECT` arranque después.
+3. Un claim más viejo que `app.outbox.claim-stale-secs` (60s) se
+   considera de un poller caído y la fila vuelve a ser reclamable.
+   Recuperación ante falla sin intervención manual.
+4. Si el publish falla, se libera el claim (`locked_at = NULL`) para
+   reintentar en el siguiente ciclo, sin esperar el vencimiento.
+
+**Por qué el claim se escribe en la misma transacción que el SELECT, y no
+después**: si el `UPDATE` fuera una segunda transacción, existiría otra
+ventana entre el commit del `SELECT` y el commit del `UPDATE` —
+exactamente la misma carrera, un paso más adentro.
+
+**Límite de la garantía**: el claim cierra la exclusión mutua *entre
+pollers vivos*, pero no la ventana del crash individual. Si el proceso
+muere entre `t2` (ack del broker) y `t3` (`published=true`), el evento
+se republica en el próximo ciclo. Por eso:
+
+- `UNIQUE(numeric_order_id, event_type)` en `outbox` evita doble *fila*
+  por la misma orden (defensa en profundidad, no sustituto del claim).
+- El **consumidor downstream** (no implementado, según alcance del PDF)
+  debe deduplicar por `numericOrderId`. Es la única capa que puede
+  cerrar esa ventana.
+
+Cubierto por `OutboxClaimTest` (spec §4.9).
 
 ---
 
@@ -276,6 +335,34 @@ explícito para no depender solo de verificación manual:
   modificar la orden existente.
 - En ambos casos, el offset del mensaje original se confirma (ack) —
   no debe reintentarse indefinidamente.
+
+### 4.9 Exclusión mutua entre los dos pollers (`OutboxClaimTest`)
+
+**Agregado tras revisión post-implementación**: el caso 4.5 cubría la
+unicidad del *insert* en `outbox`, pero nada ejercitaba el reparto de
+filas entre los dos pollers que corren en paralelo. Es la parte del
+diseño donde la garantía de "un settlement por orden" se sostiene o se
+rompe (ver §2 G6).
+
+- `claim` devuelve la fila y le escribe `locked_at`.
+- Un segundo `claim` —representando el SELECT del otro poller,
+  arrancando **después** de que el primero ya commiteó— **no** ve la fila
+  ya reclamada. Esta es la regresión que producía los duplicados.
+- Un claim vigente no vuelve a ser reclamable; uno vencido
+  (`locked_at` más viejo que el umbral) sí, cubriendo la caída de un
+  poller a mitad de publish.
+- `releaseClaim` devuelve la fila al pool sin esperar el vencimiento
+  (camino del publish fallido).
+- `markAsPublished` saca la fila del pool y limpia el claim.
+- El batch devuelto viene ordenado por `id`.
+
+El test es un **regression test** verificado: al quitar el filtro de
+`locked_at` de la query de claim, los dos casos de exclusión fallan
+exactamente en el punto esperado.
+
+**Nota de aislamiento**: el poller se desactiva en el perfil de test
+(`app.outbox.poller-enabled=false`) porque competiría por las mismas
+filas y las marcaría `published` antes de que el test pueda reclamarlas.
 
 ---
 
