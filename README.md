@@ -129,6 +129,41 @@ identificadas como críticas en `SPEC.md §4`:
 No se testea código trivial (getters, mapeos DTO) conforme al criterio
 del enunciado.
 
+## Análisis estático con CodeQL
+
+Requiere CodeQL CLI, el checkout de `github/codeql` y JDK 21. En el
+entorno usado, `codeql` y `codeql-repo` son directorios hermanos dentro
+de `~/Proyects`, por lo que el CLI encuentra automáticamente los packs
+`codeql/java-queries`. Ejecutar desde la raíz de este repo:
+
+```bash
+export CODEQL="$HOME/Proyects/codeql/codeql"
+export JAVA_HOME="$HOME/.sdkman/candidates/java/21.0.0.0+35-open"
+export PATH="$JAVA_HOME/bin:$PATH"
+export CODEQL_DB="$HOME/Proyects/challenge-arch-max-capital-codeql-db"
+export SARIF="$HOME/Proyects/challenge-arch-max-capital-codeql.sarif"
+
+"$CODEQL" database create \
+  --language=java \
+  --source-root="$PWD" \
+  --command='mvn -B -Dmaven.test.skip=true clean compile' \
+  --threads=4 \
+  "$CODEQL_DB"
+
+"$CODEQL" database analyze \
+  --format=sarifv2.1.0 \
+  --sarif-add-snippets \
+  -j=4 \
+  -o "$SARIF" \
+  "$CODEQL_DB" \
+  codeql/java-queries
+```
+
+`codeql/java-queries` ejecuta la suite Java de Code Scanning por defecto.
+La base de datos debe crearse en una ruta que todavía no exista y fuera
+de `target/`; el resultado del análisis queda en formato SARIF en la
+ruta indicada por `SARIF`.
+
 ## Troubleshooting
 
 **Error de Flyway (`Migration checksum mismatch`)**: pasa si el DDL

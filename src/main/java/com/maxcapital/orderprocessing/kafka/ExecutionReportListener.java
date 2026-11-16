@@ -7,13 +7,13 @@ import com.maxcapital.orderprocessing.service.OrderProcessingService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.springframework.kafka.annotation.BackOff;
 import org.springframework.kafka.annotation.DltHandler;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.annotation.RetryableTopic;
 import org.springframework.kafka.retrytopic.TopicSuffixingStrategy;
 import org.springframework.kafka.support.KafkaHeaders;
 import org.springframework.messaging.handler.annotation.Header;
-import org.springframework.retry.annotation.Backoff;
 import org.springframework.stereotype.Component;
 
 /**
@@ -33,7 +33,7 @@ public class ExecutionReportListener {
 
     @RetryableTopic(
         attempts = "3",
-        backoff = @Backoff(delay = 1000, multiplier = 2.0),
+        backOff = @BackOff(delay = 1000, multiplier = 2.0),
         topicSuffixingStrategy = TopicSuffixingStrategy.SUFFIX_WITH_INDEX_VALUE,
         dltTopicSuffix = ".dlq",
         exclude = {PermanentProcessingException.class, InvalidStateTransitionException.class}
