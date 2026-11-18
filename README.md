@@ -22,6 +22,9 @@ volumen primero (ver sección de troubleshooting).
 - `GET /orders/{numericOrderId}` — estado actual de la orden + ledger paginado (`?page=0&size=10`)
 - `POST /test/seed/{scenario}` — dispara un escenario de prueba a `er.raw`
 
+Este endpoint solo esta disponible con el perfil Spring `test`. Docker Compose
+activa ese perfil de forma explicita; no debe exponerlo en despliegues productivos.
+
 Ejemplo de respuesta de `GET /orders/1001` tras correr el escenario
 `interleaved` (ver sección siguiente):
 
